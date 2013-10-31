@@ -1,0 +1,400 @@
+unit wwwdde;
+
+{
+This unit provides a component to control NetScape or
+MSIE web browsers using Dynamic Data Exchange (DDE).
+
+Written by  Gary Cramblitt
+
+It provides the following methods:
+
+  ActivateBrowser - Start the browser.
+  LaunchBrowserUrl - Given a Url, cause the browser to display it (the
+  document). CaptureBrowserUrl - Capture the Url of the document
+  currently displayed by the
+    browser.
+  CaptureBrowserDoc - Capture the document currently displayed by the
+  browser.
+
+ However, it does not work with all versions of NS and MSIE, as shown
+ in the following chart.  All are 16-bit versions:
+
+ Start Browser Launch URL Capture URL Capture Doc 
+Ns 0.92 Err msg N N Could not open link  
+Ns1.2 N Y Y Y See comments  
+Ns 2.0 Y Y Y Y 
+Ns 3.0 Y Y Y Y 
+Msie 2.10.524 Y Y Y GPF 
+Msie 3.0.1068 Beta Y Y Y Y 
+
+ 
+ It is not known how it will behave with 32-bit versions
+ of browsers.
+
+ This unit also fixes a defect in the Borland
+ TDdeClientConv.RequestData method.
+}
+
+interface
+
+uses
+  WinTypes, WinProcs, Classes, DDEML,
+  DdeMan;
+
+type
+  TWwwDde = class(TDdeClientConv)
+  private
+    FDdeMaxWait: longint;
+  protected
+  public
+    constructor Create(AOwner: TComponent); override;
+    function ReqData(const Item: string): PChar;
+    function ActivateBrowser: boolean;
+    function CaptureBrowserUrl(var Title,Url: string): boolean;
+    function CaptureBrowserDoc(var TmpFile: string): boolean;
+    function LaunchBrowserUrl(Url: string): boolean;
+  property
+    DdeMaxWait: longint read FDdeMaxWait write FDdeMaxWait default
+    1000;
+  end;
+
+procedure Register;
+
+implementation
+
+uses
+  Forms, Dialogs, Controls, SysUtils;
+
+function DelimStr (A, S, E: string): string;
+  { Returns the substring from string A between strings
+    S and E.  Empty if either delimeter is not found.
+    Either or both S and E may be empty strings, in
+    which case the delimeters are beginning and ending
+    respectively of the string. }
+var
+  SI: byte;
+  T: string;
+begin
+  T := '';
+  if S = '' then SI := 1
+  else SI := Pos(S, A);
+  if SI > 0 then begin
+    T := Copy(A, SI+Length(S), 255);
+    if E = '' then SI := 255
+    else SI := Pos(E, T);
+    if SI > 0 then
+      T := Copy(T, 1, SI-1)
+    else T := '';
+  end;
+  Result := T;
+end;
+
+function ValidUrl(U: string): string;
+{ Given a Url, returns one that both MSIE and NetScape
+  will honor.  In particular, the protocol is lowercase,
+  there is always a host name, even if just three slashes. }
+var
+  P,H: string;
+  J: integer;
+begin
+  P := DelimStr(U,'',':');
+  if P <> '' then P := P + ':';
+  H := DelimStr(U,'//','/');
+  if H <> '' then H := '//'+H+'/';
+  if Pos('///',U) > 0 then H := '///';
+  if (Length(P)+Length(H)) > 0 then
+    Delete(U,1,Length(P)+Length(H));
+  if P = '' then P := 'http:';
+  if H = '' then H := '///';
+  Result := Lowercase(P)+H+U;
+{  for J := 1 to Length(Result) do
+    if Result[J] = '\' then Result[J] := '/'; }
+end;
+
+constructor TWwwDde.Create(AOwner: TComponent); {override;}
+begin
+  inherited Create(AOwner);
+  FDdeMaxWait := 1000;
+  ConnectMode := ddeManual;
+end;
+
+function TWwwDde.ReqData(const Item: string): PChar;
+{ This function replaces the defective RequestData method
+  in Borland TDdeClientConv component.  It performs the
+  same function as RequestData, but fixes a defect in
+  the handling of returned error codes.  It also uses
+  the DdeMaxWait property as the maximum time to wait
+  (in miliseconds) for the DDE to complete. }
+var
+  hdata: HDDEData;
+  ddeRslt: LongInt;
+  hszItem: HSZ;
+  CharVal: array[0..255] of Char;
+  pData: Pointer;
+  len: Longint;
+begin
+  Result := nil;
+  if (Conv = 0) or WaitStat then Exit;
+  StrPCopy(CharVal, Item);
+  hszItem := DdeCreateStringHandle(ddeMgr.DdeInstId, CharVal,
+  CP_WINANSI);
+
+  hdata := DdeClientTransaction(nil  {addr of data},
+      $FFFFFFFF  {length of data}, Conv, hszItem, DdeFmt,
+      XTYP_REQUEST, FDdeMaxWait, @ddeRslt);
+  DdeFreeStringHandle (ddeMgr.DdeInstId, hszItem);
+  if hdata = 0 then Exit;
+
+  try
+    pData := DdeAccessData (hdata, @len);
+    if pData <> nil then
+    begin
+      try
+{ Here we fix a bug in the Borland VCL.  The DDE API
+  does not require a returned error code to be a null
+  terminated "string", hence using StrCopy can overflow.
+        Result := StrAlloc (StrLen (PData) + 1);
+        StrCopy (Result, pData);
+}
+        Result := StrAlloc (len + 1);
+        FillChar(Result^,len+1,0);
+        StrLCopy(Result, pData, len);
+      finally
+        DdeUnaccessData(hdata);
+      end;
+    end;
+  finally
+    DdeFreeDataHandle (hdata);
+  end;
+end;
+
+function FileUnlocked(FN: string): boolean;
+{ This function checks to see if a file is unlocked. }
+var
+  F: File;
+  SaveMode: byte;
+begin
+  {$I-}
+  AssignFile(F, FN);
+  SaveMode := FileMode;
+  FileMode := $10;  {Set file access to read/deny all }
+  Reset(F);
+  CloseFile(F);
+  FileMode := SaveMode;
+  {$I+}
+  Result := (IOResult = 0);
+end;
+
+function CheckDdeError(D: PChar): boolean;
+{ Checks a return value from Dde for possible error values. }
+type
+  ByteArray = array[0..3] of byte;
+var
+  E: ^ByteArray absolute D;
+begin
+  Result := false;
+  if D = nil then exit;
+  if D[0] = #255 then begin
+    messageDlg(format('Error %x%x%x%x',[E^[0],E^[1],E^[2],E^[3]]),
+    mtError, [mbOk], 0);
+  end else Result := true;
+end;
+
+function TWwwDde.ActivateBrowser: boolean;
+{ Activates the browser.  Property ServiceApplication
+  must contain the path to the browser EXE. }
+var
+  DDEReturn: PChar;
+  Svc: string;
+  J: byte;
+begin
+  Result := false;
+  if ServiceApplication = '' then exit;
+  Svc := ExtractFileName(ServiceApplication);
+  if Pos('.',Svc) > 0 then Delete(Svc,Pos('.',Svc),255);
+  J := 0;
+  while (J < 6) do begin
+    Screen.Cursor := crHourglass;
+    try
+      SetLink(Svc,'WWW_Activate');
+      DDEReturn := nil;
+      if OpenLink then begin
+        DDEReturn := ReqData('0xFFFFFFFF,0x0');
+        StrDispose(DDEReturn);
+        CloseLink;
+        Result := true;
+        J := 7;
+      end else begin
+        Inc(J);
+        if J < 6 then Yield
+        else begin
+          Screen.Cursor := crDefault;
+          MessageDlg(ServiceApplication +
+            ' could not be found.  Please check the browser
+            configuration ' + 'under Options.',mtError,[mbOk],0);
+          J := 7;
+        end;
+      end;
+    finally
+      Screen.Cursor := crDefault;
+    end;
+  end;
+end;
+
+function TWwwDde.LaunchBrowserUrl(Url: string): boolean;
+{ Given a Url, causes the browser to display the document. }
+var
+  DDEReturn: PChar;
+  Svc: string;
+begin
+  Result := false;
+  if ServiceApplication = '' then exit;
+  Svc := ExtractFileName(ServiceApplication);
+  if Pos('.',Svc) > 0 then Delete(Svc,Pos('.',Svc),255);
+  if ActivateBrowser then begin
+    SetLink(Svc, 'WWW_OpenURL');
+    if (not OpenLink) then begin
+      messageDlg('Could not open link', mtError, [mbOk], 0);
+      exit;
+    end;
+    { Notes about MSIE and NetScape:  MSIE if VERY PICKY about
+      the string sent in the next statement.  First,
+      all arguments must be coded, even if left
+      blank, i.e., trailing commas are required.
+      Second, MSIE is very picky about URLs.  The
+      protocol part of the URL must be lowercase,
+      i.e., "file:", not "FILE:". NetScape, on the
+      otherhand, requires the forward slahses of
+      the host name, so while MSIE is happy with
+        file:c:\adir\afile.htm
+      NetScape is not, but both MSIE and NetScape
+      are happy with
+        file:///c:\adir\afile.htm
+      Both browsers will accept forward or backward
+      slashes. }
+    DDEReturn := ReqData(
+      '"' +
+      ValidUrl(Url) +
+      '",,0xFFFFFFFF,0x0,,,,');
+    Result := CheckDdeError(DDEReturn);
+    CloseLink;
+    StrDispose(DDEReturn);
+  end;
+end;
+
+function TWwwDde.CaptureBrowserUrl(var Title,Url: string): boolean; {
+Returns the title and Url of the document currently
+  being displayed by the browser. The browser should already
+  be active. }
+var
+  DDEReturn: PChar;
+  Svc: string;
+begin
+  Result := false;
+  if ServiceApplication = '' then exit;
+  Svc := ExtractFileName(ServiceApplication);
+  if Pos('.',Svc) > 0 then Delete(Svc,Pos('.',Svc),255);
+  Screen.Cursor := crHourglass;
+  try
+    SetLink(Svc, 'WWW_GetWindowInfo');
+    if OpenLink then begin
+      DDEReturn := nil;
+      DDEReturn := ReqData(
+        '0xFFFFFFFF');
+      if CheckDdeError(DDEReturn) and (StrPas(DDEReturn) <> '') then
+      begin
+        Url := DelimStr(StrPas(DDEReturn),'"','"');
+        Title := DelimStr(StrPas(DDEReturn),',"','"');
+        { NetScape adds square brackets around the page title,
+          so remove them. }
+        if Pos('[',Title) > 0 then Title := DelimStr(Title,'[',']');
+        Result := true;
+      end;
+      CloseLink;
+      StrDispose(DDEReturn);
+    end;
+  finally
+    Screen.Cursor := crDefault;
+  end;
+end;
+
+function TWwwDde.CaptureBrowserDoc(var TmpFile: string): boolean; {
+Instructs the browser to save the currently displayed
+  document to a temporary file.  The file name is returned.
+  The file will be in the Windows temporary directory and
+  it will start with "~dde". Calling program has
+  responsibility for deleting the temporary file when it
+  is finished with it. }
+var
+  DDEReturn: PChar;
+  Svc: string;
+  Title: string;
+  Url: string;
+  Cmd: string;
+  szTmpFile: array[0..144] of char;
+begin
+  Result := false;
+  if ServiceApplication = '' then exit;
+  Svc := ExtractFileName(ServiceApplication);
+  if Pos('.',Svc) > 0 then Delete(Svc,Pos('.',Svc),255);
+  if CaptureBrowserUrl(Title, Url) then
+  try
+    DDEReturn := nil;
+    Screen.Cursor := crHourglass;
+    { Open the URL }
+    SetLink(Svc, 'WWW_OpenURL');
+    if (not OpenLink) then begin
+      Screen.Cursor := crDefault;
+      messageDlg('Could not open link', mtError, [mbOk], 0);
+    end else begin
+      GetTempFileName(Chr(0),'dde',0,szTmpFile);
+      TmpFile := StrPas(szTmpFile);
+      DeleteFile(TmpFile);
+{     Following command works with Ns 1.2N but not with MSIE.
+      Although Ns 1.2N sucessfully saves the file, it
+      nevertheless returns FFFFFFFFF right away.  What is more,
+      putting the file name into the ProgressApp argument doesn't make
+      any sense, but that is what is needed to get Ns 1.2N to save the
+      file.  What a mess! Cmd := '"' + ValidUrl(Url) + '"' +
+        ',"' + TmpFile + '"' +
+        ',0xFFFFFFFF,0x0,,,"'+TmpFile+'",'; }
+
+      { The following command makes more sense and works with
+        most of the browsers, but it will cause a GPF in MSIE
+        16-bit 2.1 followed by a GPF in our app.  Don't know why
+        other than it must be a serious bug in MSIE. }
+      Cmd := '"' + ValidUrl(Url) + '"' +
+        ',"' + TmpFile + '"' +
+        ',0xFFFFFFFF,0x0,,,,';
+
+      DDEReturn := ReqData(Cmd);
+      CloseLink;
+      Screen.Cursor := crDefault;
+      if CheckDdeError(DDEReturn) then begin
+        Screen.Cursor := crHourglass;
+        repeat
+          Application.ProcessMessages;
+          Yield;
+        until FileExists(TmpFile);
+        repeat
+          Application.ProcessMessages;
+          Yield;
+        until FileUnlocked(TmpFile);
+        Application.BringToFront;
+        Result := true;
+      end;
+    end;
+  finally
+    Screen.Cursor := crDefault;
+    StrDispose(DDEReturn);
+  end;
+end;
+
+procedure Register;
+begin
+  RegisterComponents('Addons',[TWwwDde]);
+end;
+
+end.
+
+

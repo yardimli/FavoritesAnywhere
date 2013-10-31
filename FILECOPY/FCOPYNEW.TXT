@@ -1,0 +1,63 @@
+TFileCopyNew
+
+This is a newest enhanced release of TFileCopy.
+
+New most features :
+
+1) multifolder-multifiles copy
+2) wild cards allowed on sourceFile and targetFile properties
+3) full event-driven messaging on errors, copy progresses and overriding behaviors
+4) the memo property is ready made to attach a TMemo component to trace copy events
+
+A special thank to everybody wrote me suggestions and comments .
+This new release has born from a great brain storm, thank's to everybody has contributed to it.
+This release is the one I'm using this time and , I hope, it's the best compromise 
+between enhanced features and simplicity of use.
+
+
+technical refs :
+
+TFileCopyNew = class(TComponent)
+
+properties
+
+* IncludeSubFolders - <default true> , allows source subfolders to be included in the copy
+        The component call forceDirectories to create any target subfolder as it is in the
+	source structure
+* Memo - a TMemo component to be attached to automatically trace copy progresses
+* Name . . .
+* ShowProgressesOnMemo - write On Memo property the copy progresses
+* SourceFile - is the source path-name and allows wild cards
+* Tag  . . .
+* TargetFile - is the target path-name and allows wild cards
+
+events
+
+* OnCopyProgress - sends on event's parameters read/written bytes during copy, to be displayed
+  in a progressbar or something else accepting word parameters
+* OnError - sends on event's parameters any error string message
+* OnOverriding - sends on event's parameters the boolean CanOvveride parameter like TForm in
+  OnCloseQuery with CanClose parameter
+
+methods
+
+procedure ExecCopy - execute the copy
+
+I'm uploading DprBckp.dpr too that's a TFileCopyNew example application with sources.
+DprBckp.dpr is a freeware developer utility to backUp delphi's complex projects 
+(I mean projects mapped on multiple folders, i.e. :
+myProject\dataModules
+myProject\classes
+myProject\interfaces
+\ ... )
+
+To have more infos and frequently updated releases about this component and other products
+come to my home page : 
+
+http://space.tin.it/computer/gburzoma
+
+or mail me your suggestions at
+
+burzox@tin.it
+
+
